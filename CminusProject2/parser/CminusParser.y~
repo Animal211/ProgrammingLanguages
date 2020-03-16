@@ -1,0 +1,913 @@
+//Jake McNeilly
+//CS4121
+//Project 2
+//2-12-20
+
+/*******************************************************/
+/*                     Cminus Parser                   */
+/*                                                     */
+/*******************************************************/
+
+/*********************DEFINITIONS***********************/
+%{
+#include <stdio.h>
+#include <stdlib.h>
+#include <strings.h>
+#include <string.h>
+#include <util/general.h>
+#include <util/symtab.h>
+#include <util/symtab_stack.h>
+#include <util/dlink.h>
+#include <util/string_utils.h>
+
+#define SYMTABLE_SIZE 100
+#define SYMTAB_VALUE_FIELD     "value"
+#define SYMTAB_OFFSET_FIELD    "offset"
+#define SYMTAB_INDEX_FIELD           "index"
+
+/*********************EXTERNAL DECLARATIONS***********************/
+
+  EXTERN(void,Cminus_error,(const char*));
+
+  EXTERN(int,Cminus_lex,(void));
+
+  char *fileName;
+
+  SymTable symtab;
+
+  extern int Cminus_lineno;
+
+  extern FILE *Cminus_in;
+
+  struct Regs{ //structure that contains each regs 32 and 64 names as well as a flag for if its in use
+    int regInUse;
+    char* Reg64;
+    char* Reg32;
+  };
+
+  struct Regs Registers[14]; //create stucts for holding regs
+  static int totalRegNum = 14; //the number of register names
+  static char* names64[] = {"%r8", "%r9", "%r10", "%r11", "%r12", "%r13", "%r14", "%r15", "%rax", "%rbx", "%rcx", "%rdx", "%rsi", "%rdi"}; //stores the register names of all 64 bit regs (except the ones we save for specific calcs)
+  static char* names32[] = {"%r8d", "%r9d", "%r10d", "%r11d", "%r12d", "%r13d", "%r14d", "%r15d", "%eax", "%ebx", "%ecx", "%edx", "%esi", "%edi"}; //stores the register names of all 32 bit regs
+
+
+  int numWords = 0; //stores the number of string counstants used (needed for printing)
+  int offset = 0; //store global offset value
+
+  char* decBuf[2000]; //used to hold declarations near top that change (strings)
+  char* buf[8000]; //usd to store the string of instructions
+  char* temp[2000]; //used to hold current instruction to be appended to buffer
+
+  
+  /**FUCtion declarations**/
+  void initRegs(); //set up regs for use in main
+  int getReg(); //get index of free re
+  int get32Reg(SymTable symtab); //get index of 64 reg, put if not exist
+  int get64Reg(SymTable symtab); //same as above but 32
+  void freeReg(int reg); //set boolean flag of inuse to false for regester being freed
+  void finalPrint(); //output the assembly code
+
+  %}
+
+%name-prefix="Cminus_"
+%defines
+   
+%start Program
+
+%token AND
+%token ELSE
+%token EXIT
+%token FOR
+%token IF 
+%token INTEGER 
+%token NOT 
+%token OR 
+%token READ
+%token WHILE
+%token WRITE
+%token LBRACE
+%token RBRACE
+%token LE
+%token LT
+%token GE
+%token GT
+%token EQ
+%token NE
+%token ASSIGN
+%token COMMA
+%token SEMICOLON
+%token LBRACKET
+%token RBRACKET
+%token LPAREN
+%token RPAREN
+%token PLUS
+%token TIMES
+%token IDENTIFIER
+%token DIVIDE
+%token RETURN
+%token STRING
+%token INTCON
+%token MINUS
+
+%left OR
+%left AND
+%left NOT
+%left LT LE GT GE NE EQ
+%left PLUS MINUS
+%left TIMES DIVDE
+
+   /***********************PRODUCTIONS****************************/
+%%
+   Program: Procedures 
+          {
+	    finalPrint();
+	    //printf("<Program> -> <Procedures>\n");
+	  }
+          | DeclList Procedures
+	  {
+	    finalPrint();
+	    //printf("<Program> -> <DeclList> <Procedures>\n");
+	  }
+;
+
+Procedures : ProcedureDecl Procedures
+           {
+	     //printf("<Procedures> -> <ProcedureDecl> <Procedures>\n");
+	   }
+           |
+           {
+	     //printf("<Procedures> -> epsilon\n");
+	   }
+;
+
+ProcedureDecl : ProcedureHead ProcedureBody
+              {
+		//printf("<ProcedureDecl> -> <ProcedureHead> <ProcedureBody>\n");
+	      }
+;
+
+ProcedureHead : FunctionDecl DeclList 
+              {
+		//printf("<ProcedureHead> -> <FunctionDecl> <DeclList>\n");
+	      }
+              | FunctionDecl
+	      {
+		//printf("<ProcedureHead> -> <FunctionDecl>\n");
+	      }
+;
+
+FunctionDecl :  Type IDENTIFIER LPAREN RPAREN LBRACE 
+             {
+	       //printf("<FunctionDecl> ->  <Type> <IDENTIFIER> <LP> <RP> <LBR>\n"); 
+	     }
+;
+
+ProcedureBody : StatementList RBRACE
+              {
+		//printf("<ProcedureBody> -> <StatementList> <RBR>\n");
+	      }
+;
+
+
+DeclList : Type IdentifierList  SEMICOLON 
+         { 
+	   $$ = offset;
+	   //printf("<DeclList> -> <Type> <IdentifierList> <SC>\n");
+	 }
+         | DeclList Type IdentifierList SEMICOLON
+	 {
+	   //printf("<DeclList> -> <DeclList> <Type> <IdentifierList> <SC>\n");
+	 }
+;
+
+
+IdentifierList : VarDecl  
+               {
+		 //printf("<IdentifierList> -> <VarDecl>\n");
+	       }
+               | IdentifierList COMMA VarDecl
+	       {
+		 //printf("<IdentifierList> -> <IdentifierList> <CM> <VarDecl>\n");
+	       }
+;
+
+VarDecl : IDENTIFIER
+        {
+	  SymPutFieldByIndex(symtab, $1, SYMTAB_OFFSET_FIELD, (Generic)offset); //insert the declared variables offset into the symtab
+	  offset += 4; //increment by 4 because we just inserted a int (4 bytes)
+	  $$ = $1;
+
+	  //printf("<VarDecl> -> <IDENTIFIER\n");
+	}
+        | IDENTIFIER LBRACKET INTCON RBRACKET
+	{
+	  //printf("<VarDecl> -> <IDENTIFIER> <LBK> <INTCON> <RBK>\n");
+	}
+;
+
+Type     : INTEGER 
+         { 
+	   //printf("<Type> -> <INTEGER>\n");
+	 }
+;
+
+Statement : Assignment
+          { 
+	    //printf("<Statement> -> <Assignment>\n");
+	  }
+          | IfStatement
+	  { 
+	    //printf("<Statement> -> <IfStatement>\n");
+	  }
+          | WhileStatement
+	  { 
+	    //printf("<Statement> -> <WhileStatement>\n");
+	  }
+          | IOStatement 
+	  { 
+	    //printf("<Statement> -> <IOStatement>\n");
+	  }
+          | ReturnStatement
+	  { 
+	    //printf("<Statement> -> <ReturnStatement>\n");
+	  }
+          | ExitStatement
+	  { 
+	    //printf("<Statement> -> <ExitStatement>\n");
+	  }
+          | CompoundStatement
+	  { 
+	    //printf("<Statement> -> <CompoundStatement>\n");
+	  }
+;
+
+Assignment      : Variable ASSIGN Expr SEMICOLON
+                {		  
+		  //assigns an expression to a variable
+		  char* regName = (char*)SymGetFieldByIndex(symtab, $3, SYM_NAME_FIELD);
+		  int regindex = (int)SymGetFieldByIndex(symtab, $1, SYMTAB_INDEX_FIELD);
+		  char* regDestName = names64[regindex];
+		  
+		  sprintf(temp, "\tmovl %s, (%s)\n", regName, regDestName);
+		  strcat(buf, temp);
+		  
+		  freeReg((int)SymGetFieldByIndex(symtab, $3, SYMTAB_INDEX_FIELD));
+		  
+		  //printf("<Assignment> -> <Variable> <ASSIGN> <Expr> <SC>\n");
+		}
+;
+
+IfStatement: IF TestAndThen ELSE CompoundStatement
+           {
+	     //printf("<IfStatement> -> <IF> <TestAndThen> <ELSE> <CompoundStatement>\n");
+           }
+           | IF TestAndThen
+	   {
+	     //printf("<IfStatement> -> <IF> <TestAndThen>\n");
+	   }
+;
+
+
+TestAndThen   : Test CompoundStatement
+              {
+		//printf("<TestAndThen> -> <Test> <CompoundStatement>\n");
+	      }
+;
+
+Test          : LPAREN Expr RPAREN
+              {
+		//printf("<Test> -> <LP> <Expr> <RP>\n");
+	      }
+;
+
+
+WhileStatement  : WhileToken WhileExpr Statement
+                {
+		  //printf("<WhileStatement> -> <WhileToken> <WhileExpr> <Statement>\n");
+		}
+;
+                
+WhileExpr: LPAREN Expr RPAREN
+         {
+	   //printf("<WhileExpr> -> <LP> <Expr> <RP>\n");
+	 }
+;
+
+WhileToken: WHILE
+          {
+	    //printf("<WhileToken> -> <WHILE>\n");
+	  }
+;
+
+
+IOStatement     : READ LPAREN Variable RPAREN SEMICOLON
+                { 
+		  //read in a variable
+		  sprintf(temp, "\tmovl $.int_rformat, %%edi\n", (char*)SymGetFieldByIndex(symtab, $3, SYM_NAME_FIELD));
+		  strcat(buf, temp);
+
+		  sprintf(temp, "\tmovq %s, %%rsi\n");
+                  strcat(buf, temp);
+
+		  sprintf(temp, "\tmovl $0, %%eax\n\tcall scanf\n");
+		  strcat(buf, temp);
+
+		  freeReg((int)SymGetFieldByIndex(symtab, $3, SYMTAB_INDEX_FIELD));
+		   
+		  //printf("<IOStatement> -> <READ> <LP> <Variable> <RP> <SC>\n");
+		}
+                | WRITE LPAREN Expr RPAREN SEMICOLON
+		{
+		  //write out an expression
+		  sprintf(temp, "\tmovl %s, %%esi\n\tmovl $.int_wformat, %%edi\n", (char*)SymGetFieldByIndex(symtab, $3, SYM_NAME_FIELD));
+		  strcat(buf, temp);
+
+		  sprintf(temp, "\tmovl $0, %%eax\n");
+                  strcat(buf, temp);
+
+		  sprintf(temp, "\tcall printf\n");
+                  strcat(buf, temp);
+
+		  freeReg((int)SymGetFieldByIndex(symtab, $3, SYMTAB_INDEX_FIELD));
+		    
+		  //printf("<IOStatement> -> <WRITE> <LP> <Expr> <RP> <SC>\n");
+		}
+                | WRITE LPAREN StringConstant RPAREN SEMICOLON         
+		{
+		  //write out a string constant
+		  sprintf(temp, "\t.string_const%d: .string \"%s\"\n", numWords, SymGetFieldByIndex(symtab, $3, SYM_NAME_FIELD));
+		  strcat(decBuf, temp);
+
+		  sprintf(temp, "\tmovl $.string_const%d, %%esi\n\tmovl $.str_wformat, %%edi\n", numWords, (char*)SymGetFieldByIndex(symtab, $3, SYM_NAME_FIELD)); //num words used here to output each string constant
+		  strcat(buf, temp);
+
+		  sprintf(temp, "\tmovl $0, %%eax\n\tcall printf\n");
+                  strcat(buf, temp);
+
+		  numWords++; //we added a new word so increment for next one
+
+		  freeReg((int)SymGetFieldByIndex(symtab, $3, SYMTAB_INDEX_FIELD));
+
+		  //printf("<IOStatement> -> <WRITE> <LP> <StringConstant> <RP> <SC>\n");
+		}
+;
+
+ReturnStatement : RETURN Expr SEMICOLON
+                {
+		  //printf("<ReturnStatement> -> <RETURN> <Expr> <SC>\n");
+		}
+;
+
+ExitStatement   : EXIT SEMICOLON
+                {
+		  //printf("<ExitStatement> -> <EXIT> <SC>\n");
+		}
+;
+
+CompoundStatement : LBRACE StatementList RBRACE
+                {
+		  //printf("<CompoundStatement> -> <LBR> <StatementList> <RBR>\n");
+		}
+;
+
+StatementList   : Statement
+                {
+		  //printf("<StatementList> -> <Statement>\n");
+		}
+                | StatementList Statement
+		{
+		  //printf("<StatementList> -> <StatementList> <Statement>\n");
+		}
+;
+
+Expr            : SimpleExpr
+                {
+		  $$ = $1;
+		  //printf("<Expr> -> <SimpleExpr>\n");
+		}
+                | Expr OR SimpleExpr 
+		{
+		  char* lOp = (char*)SymGetFieldByIndex(symtab, $1, SYM_NAME_FIELD);
+		  char* rOp = (char*)SymGetFieldByIndex(symtab, $3, SYM_NAME_FIELD);
+
+		  sprintf(temp, "\torl %s, %s\n", rOp, lOp);
+		  strcat(buf, temp);
+
+		  freeReg((int)SymGetFieldByIndex(symtab, $3, SYMTAB_INDEX_FIELD));
+
+		  $$ = $1;
+
+		  //printf("<Expr> -> <Expr> <OR> <SimpleExpr> \n");
+		}
+                | Expr AND SimpleExpr 
+		{
+		  char* lOp = (char*)SymGetFieldByIndex(symtab, $1, SYM_NAME_FIELD);
+                  char* rOp = (char*)SymGetFieldByIndex(symtab, $3, SYM_NAME_FIELD);
+
+                  sprintf(temp, "\tandl %s, %s\n", rOp, lOp);
+                  strcat(buf, temp);
+
+                  freeReg((int)SymGetFieldByIndex(symtab, $3, SYMTAB_INDEX_FIELD));
+
+                  $$ = $1;
+		  //printf("<Expr> -> <Expr> <AND> <SimpleExpr> \n");
+		}
+                | NOT SimpleExpr 
+		{
+		  char* name = (char*)SymGetFieldByIndex(symtab, $2, SYM_NAME_FIELD);
+
+		  sprintf(temp, "\txorl $1, %s\n", name);
+		  strcat(buf, temp);
+
+		  $$ = $2;
+		  //printf("<Expr> -> <NOT> <SimpleExpr> \n");
+		}
+;
+
+SimpleExpr: AddExpr
+                {
+		  $$ = $1;
+		  //printf("<SimpleExpr> -> <AddExpr>\n");
+		}
+                | SimpleExpr EQ AddExpr
+		{
+		//All simple expressions are about the same however with a different command
+		  char* lOp = (char*)SymGetFieldByIndex(symtab, $1, SYM_NAME_FIELD);
+		  char* rOp = (char*)SymGetFieldByIndex(symtab, $3, SYM_NAME_FIELD);
+
+		  sprintf(temp, "\tcmpl %s, %s\n", rOp, lOp);
+		  strcat(buf, temp);
+
+		  freeReg((int)SymGetFieldByIndex(symtab, $3, SYMTAB_INDEX_FIELD));
+
+		  sprintf(temp, "\tmovl $0, %s\n", lOp);
+		  strcat(buf, temp);
+
+		  int newIndex = get32Reg(symtab);
+		  char * newName = (char*)SymGetFieldByIndex(symtab, newIndex, SYM_NAME_FIELD);
+
+		  sprintf(temp, "\tmovl $1, %s\n", newName);
+		  strcat(buf, temp);
+
+		  sprintf(temp, "\tcmove %s, %s\n", newName, lOp);
+		  strcat(buf, temp);
+
+		  freeReg((int)SymGetFieldByIndex(symtab, newIndex, SYMTAB_INDEX_FIELD));
+
+		  $$ = $1;
+		    
+		  //printf("<SimpleExpr> -> <SimpleExpr> <EQ> <AddExpr> \n");
+		}
+                | SimpleExpr NE AddExpr
+		{
+		  char* lOp = (char*)SymGetFieldByIndex(symtab, $1, SYM_NAME_FIELD);
+                  char* rOp = (char*)SymGetFieldByIndex(symtab, $3, SYM_NAME_FIELD);
+
+                  sprintf(temp, "\tcmpl %s, %s\n", rOp, lOp);
+                  strcat(buf, temp);
+
+                  freeReg((int)SymGetFieldByIndex(symtab, $3, SYMTAB_INDEX_FIELD));
+
+                  sprintf(temp, "\tmovl $0, %s\n", lOp);
+                  strcat(buf, temp);
+
+                  int newIndex = get32Reg(symtab);
+                  char * newName = (char*)SymGetFieldByIndex(symtab, newIndex, SYM_NAME_FIELD);
+
+                  sprintf(temp, "\tmovl $1, %s\n", newName);
+                  strcat(buf, temp);
+
+                  sprintf(temp, "\tcmovne %s, %s\n", newName, lOp);
+                  strcat(buf, temp);
+
+                  freeReg((int)SymGetFieldByIndex(symtab, newIndex, SYMTAB_INDEX_FIELD));
+
+                  $$ = $1;
+
+		  //printf("<SimpleExpr> -> <SimpleExpr> <NE> <AddExpr> \n");
+		}
+                | SimpleExpr LE AddExpr
+		{
+		  char* lOp = (char*)SymGetFieldByIndex(symtab, $1, SYM_NAME_FIELD);
+                  char* rOp = (char*)SymGetFieldByIndex(symtab, $3, SYM_NAME_FIELD);
+
+                  sprintf(temp, "\tcmpl %s, %s\n", rOp, lOp);
+                  strcat(buf, temp);
+
+                  freeReg((int)SymGetFieldByIndex(symtab, $3, SYMTAB_INDEX_FIELD));
+
+                  sprintf(temp, "\tmovl $0, %s\n", lOp);
+                  strcat(buf, temp);
+
+                  int newIndex = get32Reg(symtab);
+                  char * newName = (char*)SymGetFieldByIndex(symtab, newIndex, SYM_NAME_FIELD);
+
+                  sprintf(temp, "\tmovl $1, %s\n", newName);
+                  strcat(buf, temp);
+
+                  sprintf(temp, "\tcmovle %s, %s\n", newName, lOp);
+                  strcat(buf, temp);
+
+                  freeReg((int)SymGetFieldByIndex(symtab, newIndex, SYMTAB_INDEX_FIELD));
+
+                  $$ = $1;
+
+		  //printf("<SimpleExpr> -> <SimpleExpr> <LE> <AddExpr> \n");
+		}
+                | SimpleExpr LT AddExpr
+		{
+		  char* lOp = (char*)SymGetFieldByIndex(symtab, $1, SYM_NAME_FIELD);
+                  char* rOp = (char*)SymGetFieldByIndex(symtab, $3, SYM_NAME_FIELD);
+
+                  sprintf(temp, "\tcmpl %s, %s\n", rOp, lOp);
+                  strcat(buf, temp);
+
+                  freeReg((int)SymGetFieldByIndex(symtab, $3, SYMTAB_INDEX_FIELD));
+
+                  sprintf(temp, "\tmovl $0, %s\n", lOp);
+                  strcat(buf, temp);
+
+                  int newIndex = get32Reg(symtab);
+                  char * newName = (char*)SymGetFieldByIndex(symtab, newIndex, SYM_NAME_FIELD);
+
+                  sprintf(temp, "\tmovl $1, %s\n", newName);
+                  strcat(buf, temp);
+
+                  sprintf(temp, "\tcmovl %s, %s\n", newName, lOp);
+                  strcat(buf, temp);
+
+                  freeReg((int)SymGetFieldByIndex(symtab, newIndex, SYMTAB_INDEX_FIELD));
+
+                  $$ = $1;
+
+		  //printf("<SimpleExpr> -> <SimpleExpr> <LT> <AddExpr> \n");
+		}
+                | SimpleExpr GE AddExpr
+		{
+		  char* lOp = (char*)SymGetFieldByIndex(symtab, $1, SYM_NAME_FIELD);
+                  char* rOp = (char*)SymGetFieldByIndex(symtab, $3, SYM_NAME_FIELD);
+
+                  sprintf(temp, "\tcmpl %s, %s\n", rOp, lOp);
+                  strcat(buf, temp);
+
+                  freeReg((int)SymGetFieldByIndex(symtab, $3, SYMTAB_INDEX_FIELD));
+
+                  sprintf(temp, "\tmovl $0, %s\n", lOp);
+                  strcat(buf, temp);
+
+                  int newIndex = get32Reg(symtab);
+                  char * newName = (char*)SymGetFieldByIndex(symtab, newIndex, SYM_NAME_FIELD);
+
+                  sprintf(temp, "\tmovl $1, %s\n", newName);
+                  strcat(buf, temp);
+
+                  sprintf(temp, "\tcmovge %s, %s\n", newName, lOp);
+                  strcat(buf, temp);
+
+                  freeReg((int)SymGetFieldByIndex(symtab, newIndex, SYMTAB_INDEX_FIELD));
+
+                  $$ = $1;
+
+		  //printf("<SimpleExpr> -> <SimpleExpr> <GE> <AddExpr> \n");
+		}
+                | SimpleExpr GT AddExpr
+		{
+		  char* lOp = (char*)SymGetFieldByIndex(symtab, $1, SYM_NAME_FIELD);
+                  char* rOp = (char*)SymGetFieldByIndex(symtab, $3, SYM_NAME_FIELD);
+
+                  sprintf(temp, "\tcmpl %s, %s\n", rOp, lOp);
+                  strcat(buf, temp);
+
+                  freeReg((int)SymGetFieldByIndex(symtab, $3, SYMTAB_INDEX_FIELD));
+
+                  sprintf(temp, "\tmovl $0, %s\n", lOp);
+                  strcat(buf, temp);
+
+                  int newIndex = get32Reg(symtab);
+                  char * newName = (char*)SymGetFieldByIndex(symtab, newIndex, SYM_NAME_FIELD);
+
+                  sprintf(temp, "\tmovl $1, %s\n", newName);
+                  strcat(buf, temp);
+
+                  sprintf(temp, "\tcmovg %s, %s\n", newName, lOp);
+                  strcat(buf, temp);
+
+                  freeReg((int)SymGetFieldByIndex(symtab, newIndex, SYMTAB_INDEX_FIELD));
+
+                  $$ = $1;
+
+		  //printf("<SimpleExpr> -> <SimpleExpr> <GT> <AddExpr> \n");
+		}
+;
+
+AddExpr:  MulExpr            
+                {
+		  $$ = $1;
+		  //printf("<AddExpr> -> <MulExpr>\n");
+		}
+                |  AddExpr PLUS MulExpr
+		{
+		  char* lOp = (char*)SymGetFieldByIndex(symtab, $1, SYM_NAME_FIELD);
+		  char* rOp = (char*)SymGetFieldByIndex(symtab, $3, SYM_NAME_FIELD);
+
+		  sprintf(temp, "\taddl %s, %s\n", rOp, lOp);
+		  strcat(buf, temp);
+
+		  freeReg((int)SymGetFieldByIndex(symtab, $3, SYMTAB_INDEX_FIELD));
+
+		  $$ = $1;
+		    
+		  //printf("<AddExpr> -> <AddExpr> <PLUS> <MulExpr> \n");
+		}
+                |  AddExpr MINUS MulExpr
+		{
+		  char* lOp = (char*)SymGetFieldByIndex(symtab, $1, SYM_NAME_FIELD);
+                  char* rOp = (char*)SymGetFieldByIndex(symtab, $3, SYM_NAME_FIELD);
+
+		  sprintf(temp, "\tsubl %s, %s\n", rOp, lOp);
+		  strcat(buf, temp);
+
+		  freeReg((int)SymGetFieldByIndex(symtab, $3, SYMTAB_INDEX_FIELD));
+
+		  $$ = $1;
+                  
+		  //printf("<AddExpr> -> <AddExpr> <MINUS> <MulExpr> \n");
+		}
+;
+
+MulExpr:  Factor
+                {
+		  $$ = $1;
+		  
+		  //printf("<MulExpr> -> <Factor>\n");
+		}
+                |  MulExpr TIMES Factor
+		{
+		  char* lOp = (char*)SymGetFieldByIndex(symtab, $1, SYM_NAME_FIELD);
+		  char * rOp = (char*)SymGetFieldByIndex(symtab, $3, SYM_NAME_FIELD);
+
+		  sprintf(temp, "\timull %s, %s\n", rOp, lOp);
+                  strcat(buf, temp);
+		    
+		  freeReg((int)SymGetFieldByIndex(symtab, $3, SYMTAB_INDEX_FIELD));
+		  $$ = $1;
+		  
+		  //printf("<MulExpr> -> <MulExpr> <TIMES> <Factor> \n");
+		}
+                |  MulExpr DIVIDE Factor
+		{
+		  char* lOp = (char*)SymGetFieldByIndex(symtab, $1, SYM_NAME_FIELD);
+		  char* rOp = (char*)SymGetFieldByIndex(symtab, $3, SYM_NAME_FIELD);
+
+		  sprintf(temp, "\tmovl %s, %%eax\n", lOp);
+		  strcat(buf, temp);
+		  
+		  sprintf(temp, "\tcdq\n");
+		  strcat(buf, temp);
+
+		  sprintf(temp, "\tidivl %s\n", rOp);
+                  strcat(buf, temp);
+
+		  sprintf(temp, "\tmovl %%eax, %s\n", lOp);
+                  strcat(buf, temp);
+
+
+		  freeReg((int)SymGetFieldByIndex(symtab, $3, SYMTAB_INDEX_FIELD));
+
+		  $$ = $1;
+		    
+		  //printf("<MulExpr> -> <MulExpr> <DIVIDE> <Factor> \n");
+		}
+;
+
+Factor          : Variable
+                { 
+		  int newIndex = get32Reg(symtab);
+		  char* newName = (char*)SymGetFieldByIndex(symtab, newIndex, SYM_NAME_FIELD);
+
+		  int index = (int)SymGetFieldByIndex(symtab, $1, SYMTAB_INDEX_FIELD);
+		  char* name = names64[index];
+		  
+		  if (name == NULL){
+		      name = names64[$1];
+		  }
+    
+		  sprintf(temp, "\tmovl (%s), %s\n", name, newName);
+       		  strcat(buf, temp);
+
+		  freeReg((int)SymGetFieldByIndex(symtab, $1, SYMTAB_INDEX_FIELD));
+
+		  $$ = newIndex;
+
+		  //printf("<Factor> -> <Variable>\n");
+		}
+                | Constant
+		{ 
+		    
+		  $$ = $1;
+
+		  //printf("<Factor> -> <Constant>\n");
+		}
+                | IDENTIFIER LPAREN RPAREN
+		{
+		  $$ = SYM_INVALID_INDEX;
+
+		  //printf("<Factor> -> <IDENTIFIER> <LP> <RP>\n");
+		}
+                | LPAREN Expr RPAREN
+		{
+		  $$ = $2;
+
+		  //printf("<Factor> -> <LP> <Expr> <RP>\n");
+		}
+;  
+
+Variable        : IDENTIFIER
+                {
+		  int index = get64Reg(symtab);
+		  char* name = (char*)SymGetFieldByIndex(symtab, index, SYM_NAME_FIELD);
+		  int off = (int)SymGetFieldByIndex(symtab, $1, SYMTAB_OFFSET_FIELD);
+		  char offStr[10];
+
+		  snprintf(offStr, 9, "%d", off);
+
+		  sprintf(temp, "\tmovq $_gp, %s\n\taddq $%s, %s\n", name, offStr, name);
+		  strcat(buf, temp);
+
+		  $$ = index;
+
+		  //printf("<Variable> -> <IDENTIFIER>\n");
+		}
+                | IDENTIFIER LBRACKET Expr RBRACKET    
+		{
+		  $$ = SYM_INVALID_INDEX;
+
+		  //printf("<Variable> -> <IDENTIFIER> <LBK> <Expr> <RBK>\n");
+		}
+;       
+
+StringConstant : STRING
+               { 
+		 $$ = $1;
+
+		 //printf("<StringConstant> -> <STRING>\n");
+	       }
+;
+
+Constant       : INTCON
+               { 
+		 int index = get32Reg(symtab);
+		 char* name = (char*)SymGetFieldByIndex(symtab, index, SYM_NAME_FIELD);
+
+		 sprintf(temp, "\tmovl $%d, %s\n", $1, name);
+		 strcat(buf, temp);
+
+		 $$ = index;
+
+		 //printf("<Constant> -> <INTCON>\n");
+	       }
+;
+
+%%
+
+
+/********************C ROUTINES *********************************/
+void initRegs(){
+  int i;
+  for (i = 0; i < totalRegNum; i++){ //For each register input its 32, 64 reg names and initialize to not in use
+    Registers[i].Reg32 = names32[i];
+    Registers[i].Reg64 = names64[i];
+    Registers[i].regInUse = 0;
+  }
+}
+ 
+int getReg(){ //returns the index of the first register availible
+  int i;
+  for (i = 0; i < totalRegNum; i++){
+      if (Registers[i].regInUse == 0){
+	  Registers[i].regInUse = 1;
+	  return i;
+	}
+    }
+  return -1;
+}
+
+int get32Reg(SymTable symtab){
+  int reg = getReg();
+  char* name = names32[reg];
+  int index = SymQueryIndex(symtab, name);
+  
+  if(index == SYM_INVALID_INDEX){
+    index = SymIndex(symtab, name);
+    SymPutFieldByIndex(symtab, index, SYMTAB_INDEX_FIELD, (Generic)reg);
+  }
+  return index;
+}
+
+int get64Reg(SymTable symtab){
+  int reg = getReg();
+  char* name = names64[reg];
+  int index = SymQueryIndex(symtab, name);
+  
+  if(index == SYM_INVALID_INDEX){
+    index = SymIndex(symtab, name);
+    SymPutFieldByIndex(symtab, index, SYMTAB_INDEX_FIELD, (Generic)reg);
+  }
+  return index;
+}
+
+
+void freeReg(int reg){
+  Registers[reg].regInUse = 0;
+}
+
+void finalPrint(){
+  //print nessessary header info
+  printf("\t.section\t.rodata\n");
+  printf(".int_wformat: .string \"%%d\\n\"\n");
+  printf(".str_wformat: .string \"%%s\\n\"\n");
+  printf(".int_rformat: .string \"%%d\"\n");
+  
+  //print out the global pointer and info for declarations
+  if (offset != 0){ //if there is an offset there are variables, output global pointer info and declarations
+    printf("\t.comm _gp, %d, 4\n", offset);
+    printf("%s", decBuf);
+  } else { //if no offset then just output string declarations
+    printf("%s", decBuf);
+  }
+  
+  //print the required first few instructions
+  printf("\t.text\n");
+  printf("\t.global main\n");
+  printf("\t.type main,@function\n");
+  printf("main:\tnop\n");
+  printf("\tpushq %rbp\n");
+  printf("\tmovq %rsp, %rbp\n");
+  
+  //print out all saved instructions
+  printf("%s", buf);
+  
+   //print the final 2 instructions to quit
+  printf("\tleave\n");
+  printf("\tret\n");
+}
+
+void Cminus_error(const char *s){
+  fprintf(stderr,"%s: line %d: %s\n",fileName,Cminus_lineno,s);
+}
+
+int Cminus_wrap(){
+  return 1;
+}
+
+static void init(char* inputFileName){
+
+  Cminus_in = fopen(inputFileName,"r");
+  if (Cminus_in == NULL){
+    fprintf(stderr,"Error: Could not open file %s\n",inputFileName);
+    exit(-1);
+  }
+
+  char* dotChar = rindex(inputFileName,'.');
+  int endIndex = strlen(inputFileName) - strlen(dotChar);
+  char *outputFileName = nssave(2,substr(inputFileName,0,endIndex),".s");
+  
+  stdout = freopen(outputFileName,"w",stdout);
+  if (stdout == NULL){
+    fprintf(stderr,"Error: Could not open file %s\n",outputFileName);
+    exit(-1);
+  }
+
+  symtab = SymInit(SYMTABLE_SIZE);
+  SymInitField(symtab,SYMTAB_VALUE_FIELD,(Generic)-1,NULL);
+  SymInitField(symtab,SYMTAB_OFFSET_FIELD,(Generic)-1,NULL);
+  SymInitField(symtab,SYMTAB_INDEX_FIELD,(Generic)-1,NULL);
+}
+
+static void finish() {
+  SymKillField(symtab,SYMTAB_VALUE_FIELD);
+  SymKillField(symtab, SYMTAB_OFFSET_FIELD);
+  SymKillField(symtab, SYMTAB_INDEX_FIELD);
+  SymKill(symtab);
+  fclose(Cminus_in);
+  fclose(stdout);
+}
+
+int getValue(int index){
+  return (int)SymGetFieldByIndex(symtab, index, SYMTAB_VALUE_FIELD); 
+}
+
+int setValue(int index, int value){
+  SymPutFieldByIndex(symtab, index, SYMTAB_VALUE_FIELD, (Generic)value); 
+}
+
+int main(int argc, char** argv){
+  fileName = argv[1];
+  init(fileName);
+  Cminus_parse();
+  finish();
+  return 0;
+}
+
+
+/******************END OF C ROUTINES**********************/
